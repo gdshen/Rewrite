@@ -1,34 +1,49 @@
 # -*- coding: utf-8 -*-
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
+from __future__ import absolute_import, division, print_function
 
+import argparse  # 命令行参数解析库
+import glob  # unix style pathname pattern expansion
 import os
-import shutil
-import argparse
-import glob
-import tensorflow as tf
-import numpy as np
+import shutil  # shutil is a high level file operation system library
+
 import imageio
-from dataset import read_font_data, FontDataManager
+import numpy as np  # Python中的科学计算库
+import tensorflow as tf
+
+from dataset import FontDataManager, read_font_data
 from utils import render_fonts_image
 
+# 命令行传入的参数全部都解析保存到了FLAGS变量下
 FLAGS = None
 
 
 def conv2d_block(x, shape, strides, padding, scope='conv2d'):
     """
     2D convolution block.
+    strides 是每次卷积核(filters or kernels)移动的步幅
+    shape is a 1D vector like [4, 4, 4, 4]
+
+    CNN网络中的卷积层的卷积操作
+    输入：数据，设定的卷积核的shape，卷积核移动的strides, 原始数据的填充
+    输出：完成卷积之后的数据
     """
     with tf.name_scope(scope):
         if not strides:
             strides = [1, 1, 1, 1]
+
+        # out_filters is the number of filters
         out_filters = shape[-1]
+
+        # randomize initialize the filters
         W = tf.Variable(tf.truncated_normal(shape, stddev=0.01),
                         name="W")
+
+        # 输入x经过每个filter卷积操作后都加一个值
         b = tf.Variable(tf.constant(0.1, shape=[out_filters]),
                         name="b")
+
+        #conv2d is used to compute 2d convolution on 4d input and 4d filter
         Wconv_plus_b = tf.nn.conv2d(x, W, strides, padding) + b
     return Wconv_plus_b
 
@@ -45,7 +60,11 @@ def batch_norm(x, phase_train, scope='bn'):
                            name='beta', trainable=True)
         gamma = tf.Variable(tf.constant(1.0, shape=[out_filters]),
                             name='gamma', trainable=True)
+        # tf.nn.moments calculates the mean and variance of x
         batch_mean, batch_var = tf.nn.moments(x, [0, 1, 2], name='moments')
+
+        # 关于 moving average
+        # https://www.tensorflow.org/versions/r0.10/api_docs/python/train/moving_averages
         ema = tf.train.ExponentialMovingAverage(decay=0.9)
 
         def mean_var_with_update():
@@ -53,15 +72,20 @@ def batch_norm(x, phase_train, scope='bn'):
             with tf.control_dependencies([ema_apply_op]):
                 return tf.identity(batch_mean), tf.identity(batch_var)
 
+        # tf.cond 当 phase_train 为True，返回 mean_var_with_update();
+        #         当 phase_train 为FALSE，返回（ema.average....)
         mean, var = tf.cond(phase_train,
                             mean_var_with_update,
                             lambda: (ema.average(batch_mean), ema.average(batch_var)))
         normed = tf.nn.batch_normalization(x, mean, var, beta, gamma, 1e-3)
+        # 其实现在tensorflow官方的api有tf.contrib.layers.batch_norm的实现,tf.nn.batch_normalization似乎被废弃了
     return normed
 
 
 def leaky_relu(x, alpha):
     # TODO: is this memory efficient?
+    #implement leaky_relu is so easy in tensorflow?
+    #i think alpha should be less than 1
     return tf.maximum(x, x * alpha)
 
 
@@ -69,6 +93,7 @@ def block(x, shape, phase_train, strides=None, padding='SAME', scope='_block'):
     """
     Build block of the network. A three tier stacked subnet:
     conv2d -> batch_norm -> relu
+    组着三层网络结构，方便后续调用
     """
     with tf.name_scope(scope):
         conv = conv2d_block(x, shape, strides, padding)
@@ -86,6 +111,8 @@ def block_group(x, size, in_filters, out_filters, layers, phase_train, strides=N
         conv1 = block(x, [size, size, in_filters, out_filters], phase_train,
                       strides, scope="conv1_%dx%d" % (out_filters, out_filters))
         cur_conv = conv1
+
+        # 根据启动脚本时传入的模型大小，对layers数进行设置 big->layers=4, medium->layers=3, small->layers=2
         for i in range(layers - 1):
             next_conv = block(cur_conv, [size, size, out_filters, out_filters], phase_train,
                               strides, scope="conv%d_%dx%d" % (i + 2, out_filters, out_filters))
@@ -102,6 +129,7 @@ def max_pool_2x2(x, scope="max_pool_2x2"):
 def total_variation_loss(x, side):
     """
     Total variation loss for regularization of image smoothness
+    L2损失函数，计算两张图片之间的像素差异
     """
     loss = tf.nn.l2_loss(x[:, 1:, :, :] - x[:, :side - 1, :, :]) / side + \
            tf.nn.l2_loss(x[:, :, 1:, :] - x[:, :, :side - 1, :]) / side
@@ -109,11 +137,13 @@ def total_variation_loss(x, side):
 
 
 def render_frame(x, frame_dir, step, img_per_row=10):
+    # 根据传入的数据与路径画图并保存
     frame_path = os.path.join(frame_dir, "step_%04d.png" % step)
     return render_fonts_image(x, frame_path, img_per_row)
 
 
 def compile_frames_to_gif(frame_dir, gif_file):
+    # generate gif from png files
     frames = sorted(glob.glob(os.path.join(frame_dir, "*.png")))
     images = [imageio.imread(f) for f in frames]
     imageio.mimsave(gif_file, images, duration=0.1)
@@ -121,7 +151,8 @@ def compile_frames_to_gif(frame_dir, gif_file):
 
 
 def main(_):
-    side = 80
+    # tf.app.run()调用的主函数
+    side = 80 # the size of font image
     batch_size = 16
     if FLAGS.model == 'small':
         print("small model is chosen, shrink number of layers to 2")
@@ -134,7 +165,7 @@ def main(_):
 
     learning_rate = tf.placeholder(tf.float32, name="learning_rate")
     phase_train = tf.placeholder(tf.bool, name='phase_train')
-    keep_prob = tf.placeholder(tf.float32, name="keep_prob")
+    keep_prob = tf.placeholder(tf.float32, name="keep_prob") # paramater of dropout
     default_gif_name = "transition.gif"
 
     # Create the model
@@ -145,6 +176,9 @@ def main(_):
         y_image = tf.reshape(y, shape=(-1, 80, 80, 1))
 
     # block layers
+    # size 是卷积核的大小
+    # 这部分网络搭建可以结合在github上得readme文件里面网络结构图
+    # https://github.com/kaonashi-tyc/Rewrite/blob/master/images/architecture.png
     conv_64x64 = block_group(x_image, size=64, in_filters=1, out_filters=8,
                              layers=2, phase_train=phase_train, scope="conv_64_group")
     conv_32x32 = block_group(conv_64x64, size=32, in_filters=8, out_filters=32,
@@ -172,6 +206,7 @@ def main(_):
             pixel_abs_loss = tf.reduce_mean(tf.abs(y_image - y_hat_image))
             tv_loss = FLAGS.tv * total_variation_loss(y_hat_image, side)
             combined_loss = pixel_abs_loss + tv_loss
+        # 训练，降低loss
         train_step = tf.train.RMSPropOptimizer(learning_rate).minimize(combined_loss)
 
     with tf.name_scope("convert_bitmaps"):
@@ -185,6 +220,7 @@ def main(_):
     sess = tf.InteractiveSession()
     if FLAGS.mode == 'train':
         # in case train
+        # 设置训练模型时的参数
         source_font = FLAGS.source_font
         target_font = FLAGS.target_font
         num_examples = FLAGS.num_examples
@@ -197,12 +233,16 @@ def main(_):
         num_checkpoints = FLAGS.num_ckpt
         checkpoints_dir = FLAGS.ckpt_dir
 
+        # 读取数据
         dataset = FontDataManager(source_font, target_font, num_examples, split)
+
         saver = tf.train.Saver(max_to_keep=num_checkpoints)
 
         train_writer = tf.train.SummaryWriter(os.path.join(FLAGS.summary_dir, 'train'),
                                               sess.graph)
         validation_writer = tf.train.SummaryWriter(os.path.join(FLAGS.summary_dir, 'validation'))
+
+        #初始化参数
         sess.run(tf.initialize_all_variables())
         if FLAGS.capture_frame:
             print("frame capture enabled. frames saved at %s" % frame_dir)
@@ -212,6 +252,7 @@ def main(_):
             steps = i + 1
             batch_x, batch_y = dataset.next_train_batch(batch_size)
             if steps % 10 == 0:
+                # 验证训练效果并输出
                 validation_x, validation_y = dataset.get_validation()
                 summary, validation_loss, bitmaps = sess.run([merged, combined_loss, convert_bitmap],
                                                              feed_dict={x: validation_x,
@@ -228,25 +269,34 @@ def main(_):
                 validation_writer.add_summary(summary, steps)
                 train_writer.add_summary(train_summary, steps)
                 print("step %d, validation loss %g, training loss %g" % (steps, validation_loss, train_loss))
+
+            # 保存模型
             if steps % checkpoint_steps == 0:
                 # do checkpointing
                 ckpt_path = os.path.join(checkpoints_dir, "model.ckpt")
                 print("checkpoint at step %d" % steps)
                 saver.save(sess, ckpt_path, global_step=steps)
+
+            # 进行训练
             train_step.run(feed_dict={x: batch_x,
                                       y: batch_y,
                                       phase_train: True,
                                       learning_rate: FLAGS.lr,
                                       keep_prob: train_keep_prob})
+
+        # 训练跑完，把生成的图片转换成gif
         if FLAGS.capture_frame:
             print("compile frames in %s to gif" % FLAGS.frame_dir)
             gif = compile_frames_to_gif(frame_dir, os.path.join(frame_dir, default_gif_name))
             print("gif saved at %s" % gif)
+
+    # 利用训练好的模型生成
     elif FLAGS.mode == 'infer':
         infer_batch_size = 64
         saver = tf.train.Saver()
         print("checkpoint located %s" % FLAGS.ckpt)
         saver.restore(sess, FLAGS.ckpt)
+
         font_bitmaps = read_font_data(FLAGS.source_font, True)
         print("found %d source fonts" % font_bitmaps.shape[0])
         total_batches = int(np.ceil(font_bitmaps.shape[0] / infer_batch_size))
@@ -254,12 +304,15 @@ def main(_):
                                                       total_batches))
         target = list()
         batch_count = 0
+
         for i in range(0, font_bitmaps.shape[0], infer_batch_size):
             i2 = i + infer_batch_size
             batch_x = font_bitmaps[i: i2]
             batch_count += 1
             if batch_count % 10 == 0:
                 print("%d batches has completed" % batch_count)
+
+            # 跑模型
             target_bitmaps, = sess.run([convert_bitmap], feed_dict={
                 x: batch_x,
                 phase_train: False,
@@ -271,6 +324,7 @@ def main(_):
         target = np.asarray(target)
         target_path = os.path.join(FLAGS.bitmap_dir, "target.bitmap.npy")
         print("inferred bitmap save at %s" % target_path)
+
         render_batch = 100
         for i in range(0, target.shape[0], render_batch):
             render_fonts_image(target[i: i + render_batch],
@@ -282,6 +336,7 @@ def main(_):
 
 
 if __name__ == '__main__':
+    # 下面都是命令行参数设置与解析相关代码
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', type=str, default='train',
                         help='could be either infer or train')
@@ -329,7 +384,7 @@ if __name__ == '__main__':
             if FLAGS.capture_frame:
                 if os.path.exists(FLAGS.frame_dir):
                     print("removing exisiting frame dirs %s" % FLAGS.frame_dir)
-                    shutil.rmtree(FLAGS.frame_dir)
+                    shutil.rmtree(FLAGS.frame_dir) # delete the entire directory tree
                 os.mkdir(FLAGS.frame_dir)
             if os.path.exists(FLAGS.summary_dir):
                 print("removing existing summary dir %s" % FLAGS.summary_dir)
